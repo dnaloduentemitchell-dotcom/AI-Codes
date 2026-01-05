@@ -23,6 +23,43 @@ A production-ready, Docker Compose-based dashboard for XAU/USD and major FX pair
    - Streamlit: http://localhost:8501
    - API docs: http://localhost:8000/docs
 
+## Database Setup (Docker Compose)
+The Docker Compose stack includes PostgreSQL and initializes it with default credentials.
+
+**Default DB settings**
+- Host: `db` (inside Docker) or `localhost` (from your machine)
+- Port: `5432`
+- Database: `forex`
+- User: `postgres`
+- Password: `postgres`
+
+**Common Windows setup steps**
+1. Ensure Docker Desktop is running.
+2. Copy `.env.example` to `.env`, then verify `DATABASE_URL` points to the Docker database:
+   ```bash
+   DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/forex
+   ```
+3. Start the stack:
+   ```bash
+   docker compose up --build
+   ```
+4. If you are running the API **outside** Docker (Windows host Python), update `DATABASE_URL` to use `localhost`:
+   ```bash
+   DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/forex
+   ```
+
+**Troubleshooting DB errors**
+- If you see connection errors, ensure the `db` container is healthy:
+  ```bash
+  docker compose ps
+  ```
+- If port 5432 is already in use, change the exposed port in `docker-compose.yml`:
+  ```yaml
+  ports:
+    - "5433:5432"
+  ```
+  Then set `DATABASE_URL` to use port `5433`.
+
 ## Demo Mode
 If no API keys are provided, the system uses CSV demo data from `data/` to run end-to-end.
 
