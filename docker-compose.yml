@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: forex
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://postgres:postgres@db:5432/forex}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PRICE_PROVIDER: ${PRICE_PROVIDER:-demo}
+      NEWS_PROVIDER: ${NEWS_PROVIDER:-demo}
+      MACRO_PROVIDER: ${MACRO_PROVIDER:-demo}
+      ALPHAVANTAGE_API_KEY: ${ALPHAVANTAGE_API_KEY}
+      NEWS_RSS_URLS: ${NEWS_RSS_URLS}
+      DEMO_MODE: ${DEMO_MODE:-true}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    environment:
+      API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+volumes:
+  db_data:
