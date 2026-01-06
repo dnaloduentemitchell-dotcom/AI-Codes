@@ -6,13 +6,13 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 import pandas as pd
 from sqlalchemy import select
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from app.core.config import get_settings
 from app.core.rate_limit import allow_run
 from app.core.utils import utc_now
 from app.db.models import Instrument, MacroEvent, News, SystemHealth, TickOrBar
 from app.db.session import SessionLocal
+from app.analytics.news_analysis import RuleBasedNewsAnalyzer
 from app.ingestion.macro_provider_csv import CsvMacroProvider
 from app.ingestion.macro_provider_demo import DemoMacroProvider
 from app.ingestion.news_provider_demo import DemoNewsProvider
@@ -125,29 +125,54 @@ def ingest_prices() -> None:
 def ingest_news() -> None:
     settings = get_settings()
     provider = _get_news_provider(settings)
-    analyzer = SentimentIntensityAnalyzer()
+    analyzer = RuleBasedNewsAnalyzer()
     try:
         if not allow_run("news", settings.poll_news_seconds):
             return
         with SessionLocal() as session:
             last_news = session.execute(select(News).order_by(News.published_at.desc()).limit(1)).scalar_one_or_none()
             since = last_news.published_at if last_news else None
-            items = provider.fetch_news(since)
+            try:
+                items = provider.fetch_news(since)
+            except Exception:
+                logger.exception("Primary news provider failed, falling back to demo feed")
+                items = DemoNewsProvider().fetch_news(since)
             for item in items:
-                exists = session.query(News).filter(News.url == item.get("url", "")).first()
+                url = item.get("url", "")
+                title = item.get("title", "")
+                summary = item.get("summary", "")
+                analysis = analyzer.analyze(title=title, summary=summary, source=item.get("source", ""))
+                exists = session.query(News).filter(News.url == url).first()
                 if exists:
+                    if exists.title != title or exists.summary != summary:
+                        exists.title = title
+                        exists.summary = summary
+                    exists.analysis_summary = analysis.summary
+                    exists.sentiment = analysis.sentiment_score
+                    exists.sentiment_label = analysis.sentiment_label
+                    exists.impact_level = analysis.impact_level
+                    exists.impacted_assets = analysis.impacted_assets
+                    exists.rationale = analysis.rationale
+                    exists.entities = {"symbols": analysis.impacted_assets}
+                    exists.topics = analysis.topics
+                    exists.is_fundamental = analysis.is_fundamental
                     continue
-                sentiment = analyzer.polarity_scores(item.get("title", ""))
                 session.add(
                     News(
                         source=item.get("source", "unknown"),
                         published_at=item["published_at"],
-                        title=item.get("title", ""),
-                        summary=item.get("summary", ""),
-                        url=item.get("url", ""),
-                        sentiment=sentiment.get("compound"),
-                        entities={"symbols": ["XAUUSD"]},
-                        topics={"macro": 0},
+                        title=title,
+                        summary=summary,
+                        analysis_summary=analysis.summary,
+                        url=url,
+                        sentiment=analysis.sentiment_score,
+                        sentiment_label=analysis.sentiment_label,
+                        impact_level=analysis.impact_level,
+                        impacted_assets=analysis.impacted_assets,
+                        rationale=analysis.rationale,
+                        entities={"symbols": analysis.impacted_assets},
+                        topics=analysis.topics,
+                        is_fundamental=analysis.is_fundamental,
                     )
                 )
             session.commit()

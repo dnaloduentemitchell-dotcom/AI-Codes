@@ -1,4 +1,4 @@
-# Forex Intelligence Dashboard (XAU/USD Focus)
+# NewsTracker (Real-Time Forex News Intelligence)
 
 A production-ready, Docker Compose-based dashboard for XAU/USD and major FX pairs. It ingests prices, macro events, and news, stores the data in Postgres, runs ML + rule-based analytics, and renders a live Streamlit dashboard. **All signals are probabilistic analytics and are not financial advice.**
 
