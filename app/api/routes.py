@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.cache import get_redis
 from app.core.config import get_settings
-from app.db.models import MacroEvent, News, Signal, SystemHealth, TickOrBar
+from app.db.models import Instrument, MacroEvent, News, Signal, SystemHealth, TickOrBar
 from app.db.session import SessionLocal
 
 router = APIRouter()
@@ -82,23 +85,59 @@ def prices(
 
 
 @router.get("/news")
-def news(limit: int = 50, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+def news(
+    limit: int = 50,
+    instrument: str | None = None,
+    impact: str | None = None,
+    sentiment: str | None = None,
+    q: str | None = None,
+    fundamental_only: bool = False,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
     rows = (
         db.execute(select(News).order_by(News.published_at.desc()).limit(limit))
         .scalars()
         .all()
     )
-    return [
-        {
-            "published_at": row.published_at,
-            "source": row.source,
-            "title": row.title,
-            "summary": row.summary,
-            "url": row.url,
-            "sentiment": row.sentiment,
-        }
-        for row in rows
-    ]
+    filtered = []
+    for row in rows:
+        if instrument and instrument not in (row.impacted_assets or []):
+            continue
+        if impact and row.impact_level != impact:
+            continue
+        if sentiment and row.sentiment_label != sentiment:
+            continue
+        if fundamental_only and not row.is_fundamental:
+            continue
+        if q:
+            haystack = f"{row.title} {row.summary} {row.analysis_summary}".lower()
+            if q.lower() not in haystack:
+                continue
+        filtered.append(row)
+    return [_serialize_news(row) for row in filtered]
+
+
+@router.get("/news/stream")
+async def news_stream(request: Request, instrument: str | None = None) -> StreamingResponse:
+    async def event_generator():
+        last_seen: datetime | None = None
+        while True:
+            if await request.is_disconnected():
+                break
+            with SessionLocal() as session:
+                query = select(News).order_by(News.published_at.desc()).limit(25)
+                if last_seen is not None:
+                    query = select(News).where(News.published_at > last_seen).order_by(News.published_at.desc())
+                rows = session.execute(query).scalars().all()
+                if instrument:
+                    rows = [row for row in rows if instrument in (row.impacted_assets or [])]
+                if rows:
+                    last_seen = max(row.published_at for row in rows)
+                    payload = json.dumps([_serialize_news(row) for row in rows], default=str)
+                    yield f"data: {payload}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/macro")
@@ -142,3 +181,36 @@ def signals(limit: int = 50, db: Session = Depends(get_db)) -> list[dict[str, An
         }
         for row in rows
     ]
+
+
+@router.get("/instruments")
+def instruments(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    rows = db.execute(select(Instrument).order_by(Instrument.symbol)).scalars().all()
+    return [
+        {
+            "id": row.id,
+            "symbol": row.symbol,
+            "type": row.type,
+            "pip_value": row.pip_value,
+        }
+        for row in rows
+    ]
+
+
+def _serialize_news(row: News) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "published_at": row.published_at,
+        "source": row.source,
+        "title": row.title,
+        "summary": row.summary,
+        "analysis_summary": row.analysis_summary,
+        "url": row.url,
+        "sentiment": row.sentiment,
+        "sentiment_label": row.sentiment_label,
+        "impact_level": row.impact_level,
+        "impacted_assets": row.impacted_assets,
+        "rationale": row.rationale,
+        "topics": row.topics,
+        "is_fundamental": row.is_fundamental,
+    }

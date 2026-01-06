@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = "Forex Intelligence Dashboard"
+    app_name: str = "NewsTracker"
     environment: str = "development"
     database_url: str = "postgresql+psycopg2://postgres:postgres@db:5432/forex"
     redis_url: str = "redis://redis:6379/0"

@@ -1,17 +1,44 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 API_URL = os.getenv("API_URL", "http://api:8000")
 
-st.set_page_config(page_title="Forex Intelligence Dashboard", layout="wide")
+st.set_page_config(page_title="NewsTracker", layout="wide")
 
-st.title("Forex Intelligence Dashboard - XAU/USD Focus")
+st.markdown(
+    """
+    <style>
+    html, body, [class*="st-"] {
+        background-color: #0b0f17;
+        color: #e6edf3;
+    }
+    .news-card {
+        border: 1px solid #1f2a36;
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin-bottom: 12px;
+        background: #101826;
+    }
+    .impact-high { color: #ff6b6b; font-weight: 600; }
+    .impact-medium { color: #f7b731; font-weight: 600; }
+    .impact-low { color: #20bf6b; font-weight: 600; }
+    .sentiment-bullish { color: #2ecc71; }
+    .sentiment-bearish { color: #e74c3c; }
+    .sentiment-neutral { color: #95a5a6; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("NewsTracker: Real-Time Forex News Intelligence")
 st.caption("Signals are probabilistic analytics, not financial advice.")
 
 
@@ -31,15 +58,36 @@ def _rsi(series: pd.Series, period: int) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+instruments = fetch_json("/instruments")
+instrument_symbols = [item["symbol"] for item in instruments]
+instrument_map = {item["symbol"]: item["id"] for item in instruments}
+
 with st.sidebar:
     st.header("Filters")
+    instrument = st.selectbox("Instrument", instrument_symbols, index=0)
     limit = st.slider("Rows", 50, 500, 200)
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "1d"], index=0)
-    news_source_filter = st.text_input("News source filter (optional)")
-    impact_filter = st.selectbox("Macro impact", ["all", "high", "medium", "low"], index=0)
+    impact_filter = st.selectbox("Impact level", ["all", "high", "medium", "low"], index=0)
+    sentiment_filter = st.selectbox("Sentiment", ["all", "bullish", "bearish", "neutral"], index=0)
+    fundamental_only = st.toggle("Fundamental only", value=True)
+    search_query = st.text_input("Search")
 
-prices = fetch_json("/prices", {"instrument_id": 1, "timeframe": timeframe, "limit": limit})
-news = fetch_json("/news", {"limit": 50})
+prices = fetch_json(
+    "/prices",
+    {"instrument_id": instrument_map.get(instrument, 1), "timeframe": timeframe, "limit": limit},
+)
+news_params = {
+    "limit": 200,
+    "instrument": instrument,
+    "fundamental_only": fundamental_only,
+}
+if impact_filter != "all":
+    news_params["impact"] = impact_filter
+if sentiment_filter != "all":
+    news_params["sentiment"] = sentiment_filter
+if search_query:
+    news_params["q"] = search_query
+news = fetch_json("/news", news_params)
 macro = fetch_json("/macro", {"limit": 50})
 signals = fetch_json("/signals", {"limit": 5})
 
@@ -65,6 +113,40 @@ with columns[3]:
 
 st.divider()
 
+st.subheader("Live News Feed (Streaming)")
+components.html(
+    f"""
+    <div id="news-feed" style="max-height: 420px; overflow-y: auto;"></div>
+    <script>
+    const feed = document.getElementById("news-feed");
+    const source = new EventSource("{API_URL}/news/stream?instrument={instrument}");
+    function renderCard(item) {{
+        const card = document.createElement("div");
+        card.className = "news-card";
+        const impactClass = `impact-${{item.impact_level}}`;
+        const sentimentClass = `sentiment-${{item.sentiment_label}}`;
+        card.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div><strong>${{item.title}}</strong></div>
+                <div class="${{impactClass}}">${{item.impact_level.toUpperCase()}}</div>
+            </div>
+            <div style="font-size:12px; opacity:0.8;">${{new Date(item.published_at).toUTCString()}} · ${item.source}</div>
+            <div style="margin:6px 0;">${{item.analysis_summary || item.summary}}</div>
+            <div style="font-size:12px;">Assets: ${item.impacted_assets?.join(", ") || ""}</div>
+            <div style="font-size:12px;" class="${{sentimentClass}}">Sentiment: ${item.sentiment_label}</div>
+            <div style="font-size:12px; opacity:0.8;">Why: ${item.rationale || ""}</div>
+        `;
+        feed.prepend(card);
+    }}
+    source.onmessage = (event) => {{
+        const data = JSON.parse(event.data);
+        data.forEach(renderCard);
+    }};
+    </script>
+    """,
+    height=460,
+)
+
 if prices:
     df = pd.DataFrame(prices)
     df["ts"] = pd.to_datetime(df["ts"])
@@ -72,7 +154,7 @@ if prices:
     df["macd"] = df["close"].ewm(span=12, adjust=False).mean() - df["close"].ewm(span=26, adjust=False).mean()
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 
-    st.subheader("XAU/USD Candlestick")
+    st.subheader(f"{instrument} Price Chart with News")
     fig = go.Figure(
         data=[
             go.Candlestick(
@@ -81,10 +163,24 @@ if prices:
                 high=df["high"],
                 low=df["low"],
                 close=df["close"],
-                name="XAU/USD",
+                name=instrument,
             )
         ]
     )
+    if news:
+        news_df = pd.DataFrame(news)
+        news_df["published_at"] = pd.to_datetime(news_df["published_at"])
+        fig.add_trace(
+            go.Scatter(
+                x=news_df["published_at"],
+                y=[df["close"].iloc[-1]] * len(news_df),
+                mode="markers",
+                marker=dict(size=6, color="#f7b731"),
+                name="News",
+                text=news_df["title"],
+                hovertemplate="%{text}<extra></extra>",
+            )
+        )
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("RSI & MACD")
@@ -98,40 +194,29 @@ if prices:
     macd_fig.add_trace(go.Scatter(x=df["ts"], y=df["macd_signal"], name="Signal"))
     st.plotly_chart(macd_fig, use_container_width=True)
 
-st.subheader("Signal Details")
-if signals:
-    st.json(signals[0])
-    if len(signals) > 1:
-        prev = signals[1]
-        st.markdown("**What changed**")
-        st.write(
-            f"Previous: {prev['label']} ({prev['confidence']:.2f}) → "
-            f"Current: {signals[0]['label']} ({signals[0]['confidence']:.2f})"
+    if news:
+        news_df = pd.DataFrame(news)
+        news_df["published_at"] = pd.to_datetime(news_df["published_at"])
+        df = df.sort_values("ts")
+        df["return_5"] = df["close"].pct_change(5)
+        merged = pd.merge_asof(
+            news_df.sort_values("published_at"),
+            df[["ts", "return_5"]].rename(columns={"ts": "published_at"}),
+            on="published_at",
         )
-    regime = signals[0].get("explanation", {}).get("regime", {})
-    if regime:
-        st.markdown(f"**Regime:** {regime.get('regime', 'unknown')}")
-
-st.subheader("Sentiment Over Time")
-if news:
-    news_df = pd.DataFrame(news)
-    news_df["published_at"] = pd.to_datetime(news_df["published_at"])
-    sentiment_fig = go.Figure()
-    sentiment_fig.add_trace(
-        go.Scatter(x=news_df["published_at"], y=news_df["sentiment"], mode="lines+markers")
-    )
-    st.plotly_chart(sentiment_fig, use_container_width=True)
+        merged = merged.dropna()
+        if not merged.empty:
+            corr = merged["return_5"].corr(merged["sentiment"].astype(float))
+            st.metric("News/Price Correlation (5 bars)", f"{corr:.2f}")
 
 st.subheader("Latest News")
-filtered_news = news
-if news_source_filter:
-    filtered_news = [item for item in filtered_news if news_source_filter.lower() in item["source"].lower()]
-for item in filtered_news[:20]:
-    st.markdown(f"- [{item['title']}]({item['url']}) ({item['source']})")
+for item in news[:20]:
+    local_time = datetime.fromisoformat(str(item["published_at"]).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+    st.markdown(
+        f"- **{local_time}** · {item['title']} ([link]({item['url']}))  "
+        f"  \n  Impact: `{item['impact_level']}` · Sentiment: `{item['sentiment_label']}`"
+    )
 
 st.subheader("Macro Events")
-filtered_macro = macro
-if impact_filter != "all":
-    filtered_macro = [item for item in filtered_macro if item["impact"] == impact_filter]
-if filtered_macro:
-    st.dataframe(pd.DataFrame(filtered_macro))
+if macro:
+    st.dataframe(pd.DataFrame(macro))
